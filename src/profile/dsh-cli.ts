@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { delimiter } from 'node:path'
+import { delimiter, dirname, resolve, extname } from 'node:path'
 import type { ChildHandle, DshCommandResult, DshRunner } from '../types.js'
 
 export function which(command: string, pathEnv: string | undefined = process.env.PATH): string | null {
@@ -13,6 +13,24 @@ export function which(command: string, pathEnv: string | undefined = process.env
     }
   }
   return null
+}
+
+/** Resolve the packaged Windows desktop CLI without a command shell. */
+export function resolveDshLaunch(dsh: string, env: NodeJS.ProcessEnv) {
+  if (process.platform !== 'win32' || extname(dsh).toLowerCase() !== '.cmd') {
+    return { command: dsh, prefix: [] as string[], env }
+  }
+  const executable = resolve(dirname(dsh), '../../../../DeepSeek Harness.exe')
+  const archive = resolve(dirname(dsh), '../../../app.asar')
+  if (!existsSync(executable) || !existsSync(archive)) {
+    throw new Error('Unsupported dsh.cmd layout: native desktop CLI entry not found')
+  }
+  const entry = resolve(archive, 'dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/cli.js')
+  return {
+    command: executable,
+    prefix: ['--expose-internals', entry],
+    env: { ...env, ELECTRON_RUN_AS_NODE: '1' },
+  }
 }
 
 export class ProcessDshRunner implements DshRunner {
@@ -34,9 +52,11 @@ export class ProcessDshRunner implements DshRunner {
         stderr: 'dsh not found on PATH — install DeepSeek Harness and retry',
       }
     }
-    const result = spawnSync(dsh, ['plugin', '--profile', profile, ...args], {
+    const launch = resolveDshLaunch(dsh, this.extraEnv)
+    const result = spawnSync(launch.command, [...launch.prefix, 'plugin', '--profile', profile, ...args], {
       encoding: 'utf8',
-      env: this.extraEnv,
+      env: launch.env,
+      windowsHide: true,
       timeout: 10 * 60 * 1000,
     })
     if (result.error) {
@@ -58,8 +78,10 @@ export class ProcessDshRunner implements DshRunner {
     if (!dsh) {
       throw new Error('dsh not found on PATH — install DeepSeek Harness before starting the runtime')
     }
-    const child = spawn(dsh, ['--profile', options.profile], {
-      env: { ...this.extraEnv, ...options.env },
+    const launch = resolveDshLaunch(dsh, { ...this.extraEnv, ...options.env })
+    const child = spawn(launch.command, [...launch.prefix, '--profile', options.profile], {
+      env: launch.env,
+      windowsHide: true,
       cwd: options.cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
     })
